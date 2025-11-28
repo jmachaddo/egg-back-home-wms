@@ -85,10 +85,27 @@ export const dbService = {
     if (error) throw error;
   },
 
+  // Novo: Gestão do estado da última sincronização
+  async getLastSyncDate(module: string): Promise<string | null> {
+    const { data } = await supabase.from('settings').select('value').eq('key', `last_sync_${module}`).single();
+    return data?.value?.date || null;
+  },
+
+  async setLastSyncDate(module: string, date: string): Promise<void> {
+    await supabase.from('settings').upsert({ key: `last_sync_${module}`, value: { date } });
+  },
+
   // --- CUSTOMERS ---
 
   async getCustomers(): Promise<Customer[]> {
-    const { data, error } = await supabase.from('customers').select('*').order('name');
+    // Limit load to 1000 initially for performance, or implement server-side pagination later
+    // For now, let's grab the most recently updated
+    const { data, error } = await supabase
+      .from('customers')
+      .select('*')
+      .order('updated_at', { ascending: false })
+      .limit(2000); 
+
     if (error) throw error;
     
     // Map DB columns to Frontend Interface
@@ -100,20 +117,23 @@ export const dbService = {
   },
 
   async syncCustomers(customers: any[]): Promise<void> {
+    if (customers.length === 0) return;
+
     // Upsert multiple customers
     const formattedData = customers.map(c => ({
       shopify_id: c.id.toString(), // DB Column is shopify_id
       // We DO NOT send 'code' here because the column does not exist in the DB table 'customers'
-      name: `${c.first_name || ''} ${c.last_name || ''}`.trim() || c.email,
+      name: `${c.first_name || ''} ${c.last_name || ''}`.trim() || c.email || 'Sem Nome',
       email: c.email,
       phone: c.phone,
       city: c.default_address?.city || '',
       country: c.default_address?.country || '',
       active: true,
-      updated_at: new Date().toISOString()
+      updated_at: c.updated_at || new Date().toISOString()
     }));
 
     // Perform upsert based on shopify_id
+    // Supabase handles batch upserts efficiently
     const { error } = await supabase.from('customers').upsert(formattedData, { onConflict: 'shopify_id' });
     if (error) throw error;
   }

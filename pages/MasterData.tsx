@@ -8,6 +8,7 @@ export const MasterData: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'customers'>('customers');
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [syncCount, setSyncCount] = useState(0); // Show progress
   const [searchTerm, setSearchTerm] = useState('');
   const [lastSyncTime, setLastSyncTime] = useState<string>('Nunca');
   const [errorMsg, setErrorMsg] = useState('');
@@ -22,10 +23,10 @@ export const MasterData: React.FC = () => {
   // Initial Load from DB
   useEffect(() => {
     loadCustomers();
+    checkLastSync();
     
-    // Automatic Sync every 5 minutes (300000 ms)
+    // Automatic Sync every 5 minutes
     const intervalId = setInterval(() => {
-      console.log("Iniciando sincronização automática...");
       syncShopifyCustomers(false); // false = silent/auto mode
     }, 5 * 60 * 1000);
 
@@ -51,11 +52,19 @@ export const MasterData: React.FC = () => {
     }
   };
 
+  const checkLastSync = async () => {
+    const dateStr = await dbService.getLastSyncDate('customers');
+    if (dateStr && isMounted.current) {
+      setLastSyncTime(new Date(dateStr).toLocaleString());
+    }
+  };
+
   const syncShopifyCustomers = async (manual = false) => {
     if (isSyncing) return; // Prevent overlapping syncs
     if (isMounted.current) {
       setIsSyncing(true);
       setErrorMsg('');
+      setSyncCount(0);
     }
     
     try {
@@ -66,13 +75,23 @@ export const MasterData: React.FC = () => {
         else return; // Silent fail on auto sync
       }
 
-      // 2. Clean URL
+      // 2. Determine Incremental Sync Date
+      const lastSyncDateIso = await dbService.getLastSyncDate('customers');
+      
+      // 3. Clean URL
       const cleanUrl = config.shopUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
       
-      // 3. Loop for Pagination
-      let allShopifyCustomers: any[] = [];
-      // Start with limit 250 (Shopify Max)
-      let nextUrl: string | null = `https://${cleanUrl}/admin/api/2023-10/customers.json?limit=250`;
+      // 4. Construct Initial URL with Limit 250
+      let baseUrl = `https://${cleanUrl}/admin/api/2023-10/customers.json?limit=250`;
+      
+      // Add incremental filter if we have a last sync date
+      // We assume lastSyncDateIso is already valid ISO string from DB
+      if (lastSyncDateIso) {
+        baseUrl += `&updated_at_min=${lastSyncDateIso}`;
+      }
+
+      let nextUrl: string | null = baseUrl;
+      let totalProcessed = 0;
       
       while (nextUrl) {
         // Explicit typing to satisfy TS build
@@ -93,16 +112,23 @@ export const MasterData: React.FC = () => {
 
         const data = await response.json();
         const pageCustomers = data.customers || [];
-        allShopifyCustomers = [...allShopifyCustomers, ...pageCustomers];
+        
+        // --- BATCH SAVE (Crucial for 30k records) ---
+        if (pageCustomers.length > 0) {
+          await dbService.syncCustomers(pageCustomers);
+          totalProcessed += pageCustomers.length;
+          
+          if (isMounted.current) {
+             setSyncCount(totalProcessed);
+          }
+        }
 
         // Handle Pagination via Link Header
-        // Header format: <https://...>; rel="next"
         const linkHeader: string | null = response.headers.get('Link');
         nextUrl = null; // Default to stop loop
 
         if (linkHeader) {
           const links: string[] = linkHeader.split(',');
-          // Explicitly type the find callback parameter 'link' as string
           const nextLink: string | undefined = links.find((link: string) => link.includes('rel="next"'));
           if (nextLink) {
             const match: RegExpMatchArray | null = nextLink.match(/<([^>]+)>/);
@@ -113,41 +139,37 @@ export const MasterData: React.FC = () => {
         }
       }
 
-      // 4. Save to Supabase (only if we got data)
-      if (allShopifyCustomers.length > 0) {
-        await dbService.syncCustomers(allShopifyCustomers);
-        
-        // 5. Reload local state
-        await loadCustomers();
-        
-        const timeNow = new Date().toLocaleTimeString();
-        if (isMounted.current) {
-          setLastSyncTime(timeNow);
-        }
-        
-        if (manual || allShopifyCustomers.length > 0) {
-          logService.addLog({
+      // 5. Update Last Sync Date
+      if (totalProcessed > 0 || manual) {
+         const now = new Date().toISOString();
+         await dbService.setLastSyncDate('customers', now);
+         if (isMounted.current) {
+            setLastSyncTime(new Date(now).toLocaleString());
+         }
+         
+         // Reload list to show new data
+         await loadCustomers();
+
+         logService.addLog({
             action: manual ? 'Sincronizar (Manual)' : 'Sincronizar (Auto)',
             module: 'MasterData',
-            details: `Sucesso: ${allShopifyCustomers.length} clientes processados`,
+            details: `Sucesso: ${totalProcessed} clientes atualizados`,
             user: manual ? 'Admin' : 'Sistema'
           });
-        }
       }
 
     } catch (error: any) {
       console.error("Erro sync:", error);
       // Friendly error message
       let friendlyError = error.message;
-      if (error.message.includes('401')) friendlyError = "Acesso Negado (401). Verifique o Token de Acesso nas Definições.";
-      if (error.message.includes('404')) friendlyError = "Loja não encontrada (404). Verifique o URL da loja nas Definições.";
-      if (error.message.includes('Failed to fetch')) friendlyError = "Erro de Rede. Verifique a sua ligação ou se o URL está correto.";
+      if (error.message.includes('401')) friendlyError = "Acesso Negado (401). Verifique o Token.";
+      if (error.message.includes('404')) friendlyError = "Loja não encontrada (404).";
+      if (error.message.includes('Failed to fetch')) friendlyError = "Erro de Rede.";
 
       if (isMounted.current) {
         setErrorMsg(friendlyError);
       }
       
-      // Log error (throttle auto sync errors logs in real app, but logging here for visibility)
       logService.addLog({
         action: 'Erro Sync',
         module: 'MasterData',
@@ -210,7 +232,7 @@ export const MasterData: React.FC = () => {
              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
              <input 
               type="text" 
-              placeholder="Pesquisar por nome, email ou ID..." 
+              placeholder="Pesquisar..." 
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-egg-500/20 focus:border-egg-500"
@@ -218,7 +240,7 @@ export const MasterData: React.FC = () => {
           </div>
           <div className="flex items-center gap-3 w-full sm:w-auto">
             <span className="text-xs text-slate-400 hidden sm:inline-block">
-              Última sync: {lastSyncTime}
+              Última: {lastSyncTime}
             </span>
             <button 
               onClick={() => syncShopifyCustomers(true)} 
@@ -226,7 +248,7 @@ export const MasterData: React.FC = () => {
               className={`flex items-center gap-2 px-4 py-2 bg-slate-900 text-white rounded-lg text-sm font-medium hover:bg-slate-800 transition-colors w-full sm:w-auto justify-center ${isSyncing ? 'opacity-75 cursor-wait' : ''}`}
             >
               <RefreshCw size={18} className={isSyncing ? 'animate-spin' : ''} />
-              {isSyncing ? 'A Sincronizar...' : 'Sync Shopify'}
+              {isSyncing ? `A Sincronizar... (${syncCount})` : 'Sync Shopify'}
             </button>
           </div>
         </div>
@@ -265,7 +287,7 @@ export const MasterData: React.FC = () => {
                 {currentItems.length === 0 && (
                   <tr>
                     <td colSpan={6} className="px-4 py-12 text-center text-slate-500">
-                      {isSyncing ? 'A carregar dados do Shopify...' : 'Nenhum cliente encontrado.'}
+                      {isSyncing ? 'A iniciar sincronização...' : 'Nenhum cliente encontrado.'}
                     </td>
                   </tr>
                 )}
@@ -277,7 +299,7 @@ export const MasterData: React.FC = () => {
           {totalItems > 0 && (
             <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100 bg-slate-50">
               <div className="text-xs text-slate-500">
-                Mostrando <span className="font-medium">{indexOfFirstItem + 1}</span> a <span className="font-medium">{Math.min(indexOfLastItem, totalItems)}</span> de <span className="font-medium">{totalItems}</span> resultados
+                Mostrando <span className="font-medium">{indexOfFirstItem + 1}</span> a <span className="font-medium">{Math.min(indexOfLastItem, totalItems)}</span> de <span className="font-medium">{totalItems}</span>
               </div>
               <div className="flex items-center gap-2">
                 <button 
