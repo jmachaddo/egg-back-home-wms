@@ -28,12 +28,10 @@ export const dbService = {
   async upsertUser(user: Partial<User>): Promise<User | null> {
     const { id, ...rest } = user;
     // If id exists and is valid uuid, update. Else create new.
-    // Ideally let Supabase handle ID generation on insert.
     
-    // Clean object to match DB columns if needed
     const payload = { ...rest };
     
-    if (id && id.length > 10) { // Simple check if it's a UUID or existing ID
+    if (id && id.length > 10) { 
        const { data, error } = await supabase.from('users').update(payload).eq('id', id).select().single();
        if (error) throw error;
        return data;
@@ -92,14 +90,20 @@ export const dbService = {
   async getCustomers(): Promise<Customer[]> {
     const { data, error } = await supabase.from('customers').select('*').order('name');
     if (error) throw error;
-    return data || [];
+    
+    // Map DB columns to Frontend Interface
+    // The DB has 'shopify_id', but the frontend Customer type expects 'code'
+    return (data || []).map((row: any) => ({
+      ...row,
+      code: row.shopify_id // Mapping here ensures the table shows the ID correctly
+    })) as Customer[];
   },
 
   async syncCustomers(customers: any[]): Promise<void> {
     // Upsert multiple customers
     const formattedData = customers.map(c => ({
-      shopify_id: c.id.toString(), // Ensure ID is string
-      code: c.id.toString(),
+      shopify_id: c.id.toString(), // DB Column is shopify_id
+      // We DO NOT send 'code' here because the column does not exist in the DB table 'customers'
       name: `${c.first_name || ''} ${c.last_name || ''}`.trim() || c.email,
       email: c.email,
       phone: c.phone,
