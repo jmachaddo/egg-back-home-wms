@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Users, Search, RefreshCw, CheckCircle, Ban } from 'lucide-react';
 import { Customer } from '../types';
 import { logService } from '../services/logService';
@@ -11,73 +11,117 @@ export const MasterData: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [lastSyncTime, setLastSyncTime] = useState<string>('Nunca');
   const [errorMsg, setErrorMsg] = useState('');
+  
+  // Ref to track if component is mounted to prevent state updates on unmount
+  const isMounted = useRef(true);
 
   // Initial Load from DB
   useEffect(() => {
     loadCustomers();
+    
+    // Automatic Sync every 5 minutes (300000 ms)
+    const intervalId = setInterval(() => {
+      console.log("Iniciando sincronização automática...");
+      syncShopifyCustomers(false); // false = silent/auto mode
+    }, 5 * 60 * 1000);
+
+    return () => {
+      isMounted.current = false;
+      clearInterval(intervalId);
+    };
   }, []);
 
   const loadCustomers = async () => {
     try {
       const data = await dbService.getCustomers();
-      setCustomers(data);
+      if (isMounted.current) {
+        setCustomers(data);
+      }
     } catch (e) {
       console.error("Error loading customers", e);
     }
   };
 
   const syncShopifyCustomers = async (manual = false) => {
-    setIsSyncing(true);
-    setErrorMsg('');
+    if (isSyncing) return; // Prevent overlapping syncs
+    if (isMounted.current) {
+      setIsSyncing(true);
+      setErrorMsg('');
+    }
     
     try {
       // 1. Get Config
       const config = await dbService.getShopifyConfig();
       if (!config.connected || !config.shopUrl || !config.accessToken) {
-        throw new Error("Loja Shopify não conectada nas Definições.");
+        if (manual) throw new Error("Loja Shopify não conectada nas Definições.");
+        else return; // Silent fail on auto sync
       }
 
-      // 2. Clean URL (remove https:// and trailing slashes to prevent double protocol errors)
+      // 2. Clean URL
       const cleanUrl = config.shopUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
-
-      // 3. Call Shopify API via CORS Proxy
-      // Note: In a real backend env, we wouldn't need a proxy. 
-      // Using corsproxy.io for demo purposes to bypass browser CORS restriction on localhost/vercel.
-      const targetUrl = `https://${cleanUrl}/admin/api/2023-10/customers.json?limit=50`;
-      const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`;
       
-      const response = await fetch(proxyUrl, {
-        method: 'GET',
-        headers: {
-          'X-Shopify-Access-Token': config.accessToken,
-          'Content-Type': 'application/json'
-        }
-      });
+      // 3. Loop for Pagination
+      let allShopifyCustomers: any[] = [];
+      // Start with limit 250 (Shopify Max)
+      let nextUrl: string | null = `https://${cleanUrl}/admin/api/2023-10/customers.json?limit=250`;
+      
+      while (nextUrl) {
+        const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(nextUrl)}`;
+        
+        const response = await fetch(proxyUrl, {
+          method: 'GET',
+          headers: {
+            'X-Shopify-Access-Token': config.accessToken,
+            'Content-Type': 'application/json'
+          }
+        });
 
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`Erro Shopify (${response.status}): ${errText}`);
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(`Erro Shopify (${response.status}): ${errText}`);
+        }
+
+        const data = await response.json();
+        const pageCustomers = data.customers || [];
+        allShopifyCustomers = [...allShopifyCustomers, ...pageCustomers];
+
+        // Handle Pagination via Link Header
+        // Header format: <https://...>; rel="next"
+        const linkHeader = response.headers.get('Link');
+        nextUrl = null; // Default to stop loop
+
+        if (linkHeader) {
+          const links = linkHeader.split(',');
+          const nextLink = links.find(link => link.includes('rel="next"'));
+          if (nextLink) {
+            const match = nextLink.match(/<([^>]+)>/);
+            if (match) {
+              nextUrl = match[1];
+            }
+          }
+        }
       }
 
-      const data = await response.json();
-      const shopifyCustomers = data.customers || [];
-
-      // 4. Save to Supabase
-      await dbService.syncCustomers(shopifyCustomers);
-      
-      // 5. Reload local state
-      await loadCustomers();
-      
-      const timeNow = new Date().toLocaleTimeString();
-      setLastSyncTime(timeNow);
-      
-      if (manual) {
-        logService.addLog({
-          action: 'Sincronizar',
-          module: 'MasterData',
-          details: `Sincronização com sucesso: ${shopifyCustomers.length} clientes encontrados`,
-          user: 'Admin'
-        });
+      // 4. Save to Supabase (only if we got data)
+      if (allShopifyCustomers.length > 0) {
+        await dbService.syncCustomers(allShopifyCustomers);
+        
+        // 5. Reload local state
+        await loadCustomers();
+        
+        const timeNow = new Date().toLocaleTimeString();
+        if (isMounted.current) {
+          setLastSyncTime(timeNow);
+        }
+        
+        if (manual || allShopifyCustomers.length > 0) {
+          logService.addLog({
+            action: manual ? 'Sincronizar (Manual)' : 'Sincronizar (Auto)',
+            module: 'MasterData',
+            details: `Sucesso: ${allShopifyCustomers.length} clientes processados`,
+            user: manual ? 'Admin' : 'Sistema'
+          });
+        }
       }
 
     } catch (error: any) {
@@ -88,8 +132,11 @@ export const MasterData: React.FC = () => {
       if (error.message.includes('404')) friendlyError = "Loja não encontrada (404). Verifique o URL da loja nas Definições.";
       if (error.message.includes('Failed to fetch')) friendlyError = "Erro de Rede. Verifique a sua ligação ou se o URL está correto.";
 
-      setErrorMsg(friendlyError);
+      if (isMounted.current) {
+        setErrorMsg(friendlyError);
+      }
       
+      // Log error (throttle auto sync errors logs in real app, but logging here for visibility)
       logService.addLog({
         action: 'Erro Sync',
         module: 'MasterData',
@@ -97,7 +144,9 @@ export const MasterData: React.FC = () => {
         user: 'System'
       });
     } finally {
-      setIsSyncing(false);
+      if (isMounted.current) {
+        setIsSyncing(false);
+      }
     }
   };
 
