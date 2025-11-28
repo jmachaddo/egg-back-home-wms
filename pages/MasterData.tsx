@@ -75,9 +75,10 @@ export const MasterData: React.FC = () => {
       let nextUrl: string | null = `https://${cleanUrl}/admin/api/2023-10/customers.json?limit=250`;
       
       while (nextUrl) {
-        const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(nextUrl)}`;
+        // Explicit typing to satisfy TS build
+        const proxyUrl: string = `https://corsproxy.io/?${encodeURIComponent(nextUrl)}`;
         
-        const response = await fetch(proxyUrl, {
+        const response: Response = await fetch(proxyUrl, {
           method: 'GET',
           headers: {
             'X-Shopify-Access-Token': config.accessToken,
@@ -96,14 +97,15 @@ export const MasterData: React.FC = () => {
 
         // Handle Pagination via Link Header
         // Header format: <https://...>; rel="next"
-        const linkHeader = response.headers.get('Link');
+        const linkHeader: string | null = response.headers.get('Link');
         nextUrl = null; // Default to stop loop
 
         if (linkHeader) {
-          const links = linkHeader.split(',');
-          const nextLink = links.find(link => link.includes('rel="next"'));
+          const links: string[] = linkHeader.split(',');
+          // Explicitly type the find callback parameter 'link' as string
+          const nextLink: string | undefined = links.find((link: string) => link.includes('rel="next"'));
           if (nextLink) {
-            const match = nextLink.match(/<([^>]+)>/);
+            const match: RegExpMatchArray | null = nextLink.match(/<([^>]+)>/);
             if (match) {
               nextUrl = match[1];
             }
