@@ -1,5 +1,8 @@
 import { GoogleGenAI } from "@google/genai";
 
+// Declare process to fix Vercel build error TS2580
+declare const process: any;
+
 // Ensure API Key is available
 const apiKey = process.env.API_KEY || '';
 
