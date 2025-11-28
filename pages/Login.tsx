@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Egg, ArrowRight, Lock, Mail } from 'lucide-react';
 import { logService } from '../services/logService';
+import { dbService } from '../services/dbService';
 
 interface LoginProps {
   onLogin: () => void;
@@ -12,33 +13,39 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setLoading(true);
 
-    // Simulating authentication delay
-    setTimeout(() => {
-      // Hardcoded check for the requested admin user
-      if (email === 'joao.machado@eggbackhome.com' && password === 'Offerside1!') {
+    try {
+      const user = await dbService.authenticate(email, password);
+
+      if (user) {
+        // Save user session
+        localStorage.setItem('egg_user', JSON.stringify(user));
+
         logService.addLog({
           action: 'Login',
           module: 'System',
-          details: 'Login com sucesso',
-          user: 'João Machado'
+          details: 'Login com sucesso via Supabase',
+          user: user.name
         });
         onLogin();
       } else {
-        setError('Email ou password incorretos.');
-        logService.addLog({
-          action: 'Login Falhado',
-          module: 'System',
-          details: `Tentativa falhada para: ${email}`,
-          user: 'Desconhecido'
-        });
-        setLoading(false);
+        throw new Error('Credenciais inválidas');
       }
-    }, 800);
+    } catch (err) {
+      setError('Email ou password incorretos.');
+      logService.addLog({
+        action: 'Login Falhado',
+        module: 'System',
+        details: `Tentativa falhada para: ${email}`,
+        user: 'Desconhecido'
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -95,7 +102,7 @@ export const Login: React.FC<LoginProps> = ({ onLogin }) => {
               disabled={loading}
               className={`w-full py-2.5 bg-slate-900 text-white rounded-lg text-sm font-medium hover:bg-slate-800 transition-all flex items-center justify-center gap-2 ${loading ? 'opacity-70 cursor-not-allowed' : ''}`}
             >
-              {loading ? 'A entrar...' : (
+              {loading ? 'A validar...' : (
                 <>
                   Entrar na Plataforma <ArrowRight size={16} />
                 </>

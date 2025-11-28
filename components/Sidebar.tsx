@@ -15,6 +15,15 @@ const navItems: NavItem[] = [
 export const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
   const location = useLocation();
 
+  // Retrieve user info from local storage
+  const userJson = localStorage.getItem('egg_user');
+  const user = userJson ? JSON.parse(userJson) : { name: 'Utilizador', role: 'Visitante' };
+
+  // Generate initials
+  const initials = user.name 
+    ? user.name.split(' ').map((n:any) => n[0]).join('').substring(0, 2).toUpperCase() 
+    : 'U';
+
   return (
     <aside className="w-64 bg-white border-r border-slate-200 h-screen fixed left-0 top-0 hidden md:flex flex-col z-10">
       <div className="p-6 flex items-center gap-3 border-b border-slate-100">
@@ -57,11 +66,11 @@ export const Sidebar: React.FC<SidebarProps> = ({ onLogout }) => {
         </button>
         <div className="flex items-center gap-3 pt-2 border-t border-slate-50">
           <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-xs font-bold text-slate-600">
-            JM
+            {initials}
           </div>
           <div className="overflow-hidden">
-            <p className="text-sm font-medium text-slate-700 truncate">João Machado</p>
-            <p className="text-xs text-slate-500 truncate">Administrador</p>
+            <p className="text-sm font-medium text-slate-700 truncate">{user.name}</p>
+            <p className="text-xs text-slate-500 truncate">{user.role}</p>
           </div>
         </div>
       </div>
